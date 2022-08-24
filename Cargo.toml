@@ -1,0 +1,13 @@
+[package]
+name = "imessage-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4.22"
+clap = { version = "3.2.17", features = ["derive"] }
+eframe = "0.19.0"
+egui = "0.19.0"
+eyre = "0.6.8"
+sqlx = { version = "0.6.1", features = ["runtime-tokio-native-tls", "sqlite"] }
+tokio = { version = "1.20.1", features = ["full"] }
