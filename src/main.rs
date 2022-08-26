@@ -1,14 +1,19 @@
 use std::{
     future::Future,
     sync::{Arc, Mutex, MutexGuard},
-    time::Instant,
 };
 
 use chrono::prelude::*;
 use clap::Parser;
+use egui::{Color32, Frame, Rgba, Rounding, Stroke, Ui};
 use eyre::Result;
 use sqlx::SqlitePool;
 use tokio::runtime::Runtime;
+
+lazy_static::lazy_static! {
+    static ref BLUE: Color32 = Rgba::from_srgba_premultiplied(65, 136, 247, 255).into();
+    static ref GREY: Color32 = Rgba::from_srgba_premultiplied(59, 59, 61, 255).into();
+}
 
 #[derive(Parser)]
 /// View historical iMessage chats based on a `chat.db` file
@@ -75,7 +80,7 @@ struct Chat {
     last_active: DateTime<Utc>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 enum Sender {
     Me,
     SomeoneElse(String),
@@ -135,10 +140,10 @@ impl MyEguiApp {
         let db = self.db.clone();
 
         self.load(self.selected_chat_messages.clone(), async move {
-            let messages = sqlx::query_as::<_, (String, i64, Option<String>)>(
+            let messages = sqlx::query_as::<_, (String, i64, String, bool)>(
                 r#"
                     SELECT
-                        m.text, m.date, h.id
+                        m.text, m.date, h.id, m.is_from_me
                     from message m
                     join chat_message_join cmj
                         on m.ROWID = cmj.message_id
@@ -155,14 +160,16 @@ impl MyEguiApp {
             .fetch_all(&db)
             .await?
             .into_iter()
-            .map(|(text, timestamp, sender)| Message {
+            .map(|(text, timestamp, sender, is_from_me)| Message {
                 text,
                 date: time(timestamp),
-                sender: sender.map(Sender::SomeoneElse).unwrap_or(Sender::Me),
+                sender: if is_from_me {
+                    Sender::Me
+                } else {
+                    Sender::SomeoneElse(sender)
+                },
             })
             .collect::<Vec<_>>();
-
-            println!("Loaded {} messages", messages.len());
 
             Ok(messages)
         });
@@ -201,25 +208,43 @@ impl MyEguiApp {
 
 impl eframe::App for MyEguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::SidePanel::left("my_left_panel").show(ctx, |ui| match &*self.chats.get() {
-            State::Empty => {
-                ui.heading("no chats found");
-            }
-            State::Fetching => {
-                ui.heading("loading...");
-            }
-            State::Ready(chats) => {
-                for chat in chats {
-                    if ui
-                        .add(egui::Button::new(format!(
-                            "{} - {:?}",
-                            chat.name, chat.last_active
-                        )))
-                        .clicked()
-                    {
-                        self.selected_chat = Some(chat.clone());
-                        self.load_messages(chat.name.clone());
-                    }
+        egui::SidePanel::left("my_left_panel").show(ctx, |ui| {
+            let guard = self.chats.get();
+
+            match &*guard {
+                State::Empty => {
+                    ui.heading("no chats found");
+                }
+                State::Fetching => {
+                    ui.heading("loading...");
+                }
+                State::Ready(chats) => {
+                    let chats = chats.to_owned();
+                    drop(guard);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for chat in chats {
+                            let mut frame = Frame::group(ui.style());
+
+                            if let Some(c) = &self.selected_chat {
+                                if c.name == chat.name {
+                                    frame = frame.fill(*BLUE);
+                                }
+                            }
+
+                            let response = frame
+                                .show(ui, |ui| {
+                                    ui.visuals_mut().override_text_color = Some(Color32::WHITE);
+                                    ui.label(&chat.name);
+                                    ui.label(format!("{:?}", chat.last_active));
+                                })
+                                .response;
+
+                            if response.interact(egui::Sense::click()).clicked() {
+                                self.selected_chat = Some(chat.clone());
+                                self.load_messages(chat.name.clone());
+                            }
+                        }
+                    });
                 }
             }
         });
@@ -235,21 +260,37 @@ impl eframe::App for MyEguiApp {
                     State::Fetching => {
                         ui.label("loading...");
                     }
-                    State::Ready(messages) => {
-                        let start = Instant::now();
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for msg in messages {
-                                ui.group(|ui| {
-                                    ui.label(&msg.text);
-                                });
-                            }
-                        });
-                        dbg!(start.elapsed());
-                    }
+                    State::Ready(messages) => render_messages(ui, messages),
                 }
             } else {
                 ui.heading("select a chat on the left");
             }
         });
     }
+}
+
+fn render_messages(ui: &mut Ui, messages: &[Message]) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for msg in messages {
+            let (layout, bg) = if msg.sender == Sender::Me {
+                (egui::Layout::right_to_left(egui::Align::TOP), *BLUE)
+            } else {
+                (egui::Layout::left_to_right(egui::Align::TOP), *GREY)
+            };
+
+            ui.with_layout(layout, |ui| {
+                ui.visuals_mut().override_text_color = Some(Color32::WHITE);
+
+                Frame::group(ui.style())
+                    .fill(bg)
+                    .stroke(Stroke::none())
+                    .rounding(Rounding::same(2.0 * 3.14))
+                    .show(ui, |ui| {
+                        ui.set_max_width(250.0);
+                        ui.style_mut().wrap = Some(true);
+                        ui.label(&msg.text);
+                    });
+            });
+        }
+    });
 }
